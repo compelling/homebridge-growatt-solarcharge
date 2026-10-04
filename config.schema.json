@@ -1,17 +1,47 @@
 {
-  "pluginAlias": "ExampleHomebridgePlugin",
-  "pluginType": "platform",
-  "singular": true,
-  "strictValidation": false,
+  "pluginAlias": "GrowattSolarCharge",
+  "pluginType": "accessory",
   "schema": {
     "type": "object",
-    "required": ["name"],
-    "additionalProperties": false,
     "properties": {
       "name": {
-        "title": "Name",
+        "title": "Accessory Name",
         "type": "string",
-        "default": "Example Dynamic Platform"
+        "default": "Growatt SPH Inverter",
+        "required": true
+      },
+      "serialPort": {
+        "title": "Serial Port Path",
+        "type": "string",
+        "default": "/dev/ttyUSB0",
+        "required": true
+      },
+      "pollingInterval": {
+        "title": "Polling Interval (seconds)",
+        "type": "integer",
+        "default": 300,
+        "minimum": 5,
+        "description": "DEPRECATED: Use uploadInterval instead. This field is ignored."
+      },
+      "uploadInterval": {
+        "title": "Data Upload Interval (seconds)",
+        "type": "integer",
+        "default": 300,
+        "minimum": 60,
+        "maximum": 3600,
+        "description": "How often to aggregate and upload averaged data to SolarCharge API (60-3600 seconds, default 300 = 5 minutes)"
+      },
+      "plantId": {
+        "title": "Plant ID",
+        "type": "string",
+        "description": "Enter your SolarCharge Plant ID for uploading inverter data",
+        "required": true
+      },
+      "serialNum": {
+        "title": "Serial Number",
+        "type": "string",
+        "description": "Enter your SolarCharge serial number for uploading data",
+        "required": true
       }
     }
   }
