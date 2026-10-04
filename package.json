@@ -1,6 +1,6 @@
 {
   "name": "homebridge-growatt-solarcharge",
-  "displayName": "Growatt SolarCharge",
+  "displayName": "Platform: Growatt SolarCharge",
   "type": "module",
   "version": "1.0.0",
   "private": true,

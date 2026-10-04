@@ -1,11 +1,11 @@
 {
   "pluginAlias": "GrowattSolarCharge",
-  "pluginType": "accessory",
+  "pluginType": "platform",
   "schema": {
     "type": "object",
     "properties": {
       "name": {
-        "title": "Accessory Name",
+        "title": "Name",
         "type": "string",
         "default": "Growatt SPH Inverter",
         "required": true
@@ -15,13 +15,6 @@
         "type": "string",
         "default": "/dev/ttyUSB0",
         "required": true
-      },
-      "pollingInterval": {
-        "title": "Polling Interval (seconds)",
-        "type": "integer",
-        "default": 300,
-        "minimum": 5,
-        "description": "DEPRECATED: Use uploadInterval instead. This field is ignored."
       },
       "uploadInterval": {
         "title": "Data Upload Interval (seconds)",

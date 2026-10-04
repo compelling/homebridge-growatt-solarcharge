@@ -87,12 +87,12 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
   private readonly plantId!: string;
   private readonly serialNum!: string;
   private readonly serialPort!: string;
-  private readonly pollInterval: number; // Fast polling: 5 seconds
-  private readonly uploadInterval: number; // Aggregated upload interval (1-60 minutes)
+  private readonly pollInterval: number = 5000; // Fixed polling: 5 seconds (hardcoded)
+  private readonly uploadInterval!: number; // Aggregated upload interval (1-60 minutes)
 
   private pollingTimer?: NodeJS.Timeout;
   private uploadTimer?: NodeJS.Timeout;
-  private dataBuffer: DataBuffer;
+  private dataBuffer!: DataBuffer;
   private accessory?: PlatformAccessory;
 
   // HomeKit Services
@@ -114,7 +114,7 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
     this.plantId = config.plantId;
     this.serialNum = config.serialNum;
     this.serialPort = config.serialPort || '/dev/ttyUSB0';
-    // Fast polling interval: always 5 seconds for HomeKit responsiveness
+    // Fixed polling interval: always 5 seconds for HomeKit responsiveness
     this.pollInterval = 5000;
     // Upload aggregation interval: configurable, default 300s (5 minutes)
     this.uploadInterval = Math.max(config.uploadInterval || 300, 60) * 1000;
@@ -185,7 +185,7 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
         'Modbus connection established successfully! Starting polling loops.',
       );
 
-      // Initial poll and start the fast polling timer (5 seconds)
+      // Initial poll and start the fixed polling timer (5 seconds)
       await this.pollInverterData();
       this.pollingTimer = setInterval(
         () => this.pollInverterData(),
@@ -199,7 +199,7 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
       );
 
       this.log.info(
-        `Fast polling: every ${this.pollInterval}ms | Aggregated upload: every ${this.uploadInterval}ms`,
+        `Fixed polling: every ${this.pollInterval}ms | Aggregated upload: every ${this.uploadInterval}ms`,
       );
     } catch (error: any) {
       this.log.error(
