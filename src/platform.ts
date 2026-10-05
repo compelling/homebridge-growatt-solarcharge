@@ -157,15 +157,25 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
       this.accessory.getService(this.api.hap.Service.LightSensor) ||
       this.accessory.addService(this.api.hap.Service.LightSensor);
 
-    this.lightSensorService.setCharacteristic(
-      this.api.hap.Characteristic.Name,
-      'Current Production',
-    );
+    this.lightSensorService
+      .setCharacteristic(this.api.hap.Characteristic.Name, 'Current Production')
+      .setCharacteristic(
+        this.api.hap.Characteristic.CurrentAmbientLightLevel,
+        0.0001, // HomeKit minimum lux value
+      );
 
     // Setup Battery Service (Used to display Battery State of Charge %)
     this.batteryService =
       this.accessory.getService(this.api.hap.Service.Battery) ||
       this.accessory.addService(this.api.hap.Service.Battery);
+
+    this.batteryService
+      .setCharacteristic(this.api.hap.Characteristic.Name, 'Inverter Battery')
+      .setCharacteristic(this.api.hap.Characteristic.BatteryLevel, 50) // Initial default
+      .setCharacteristic(
+        this.api.hap.Characteristic.StatusLowBattery,
+        this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL,
+      );
   }
 
   private async connectAndStartPolling(): Promise<void> {
@@ -289,13 +299,16 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
       }
 
       if (this.batteryService) {
+        // Update BatteryLevel characteristic with the actual percentage
         this.batteryService.updateCharacteristic(
           this.api.hap.Characteristic.BatteryLevel,
           batterySoc,
         );
-        // Alert if battery is below 15%
+
+        // Update StatusLowBattery: only set to LOW if battery < 10%, otherwise NORMAL
+        // This prevents the "Low battery voltage" warning from appearing unnecessarily
         const isLow =
-          batterySoc < 15
+          batterySoc < 10
             ? this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW
             : this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL;
         this.batteryService.updateCharacteristic(
