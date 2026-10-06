@@ -104,6 +104,7 @@ export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
   private batteryService?: Service;
   private switchService?: Service;
   private temperatureSensorService?: Service;
+  private batterySwitchService?: Service;
 
   constructor(
     public readonly log: Logging,
@@ -166,6 +167,39 @@ export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
       return;
     }
 
+    // CRITICAL: Detect and REPAIR cached "Solar Battery" accessory
+    // Old version has TemperatureSensor with "Battery %" name → causes HAP-NodeJS validation loop + CPU spike
+    if (accessory.displayName === 'Solar Battery') {
+      const expectedUuid = this.api.hap.uuid.generate(`${this.brand}-${this.inverterType}-battery-level`);
+      
+      // First: Check if TemperatureSensor has the old "Battery %" name and REMOVE it
+      const tempSensor = accessory.getService(this.api.hap.Service.TemperatureSensor);
+      if (tempSensor) {
+        const nameChar = tempSensor.getCharacteristic(this.api.hap.Characteristic.Name);
+        if (nameChar && (nameChar.value === 'Battery %' || String(nameChar.value).includes('Battery %'))) {
+          this.log.error('🚨 CRITICAL: Found cached TemperatureSensor with INVALID "Battery %" name!');
+          this.log.error('   This causes HAP-NodeJS validation loop and 90% CPU spike.');
+          this.log.error('   Removing the broken service and will recreate with "Battery Level" name...');
+          // Remove the broken service
+          accessory.removeService(tempSensor);
+        }
+      }
+
+      // Second: If this is our expected UUID, keep the accessory and let discoverDevices() fix it
+      if (accessory.UUID === expectedUuid) {
+        this.log.info('✓ Solar Battery accessory UUID is correct. Services will be repaired in discoverDevices()...');
+      } else {
+        // UUID doesn't match our current config - it's from old hardcoded Growatt-SPH version
+        this.log.error('🚨 CRITICAL: Solar Battery has OLD hardcoded Growatt-SPH UUID!');
+        this.log.error(`   UUID: ${accessory.UUID} | Expected: ${expectedUuid}`);
+        this.log.error('   Unregistering and will recreate with dynamic UUID...');
+        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
+          accessory,
+        ]);
+        return; // Don't cache the old UUID version
+      }
+    }
+
     this.accessories.push(accessory);
 
     if (accessory.UUID === inverterUuid) {
@@ -184,11 +218,49 @@ export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
   // │  └─ 🔋 Battery → "Inverter Battery" (secondary - details only)
   // │
   // └─ 🔌 ACCESSORY 2: "Solar Battery"
-  //    └─ 🌡️ TemperatureSensor → "Battery %" (tile on Home screen)
+  //    ├─ 🔘 Switch → "Battery Status" (big tile on Home screen - on if healthy ≥10%, off if low)
+  //    └─ 🌡️ TemperatureSensor → "Battery Level" (secondary - shows % in details)
 
   private discoverDevices(): void {
     const inverterUuid = this.api.hap.uuid.generate(`${this.brand}-${this.inverterType}-inverter-device`);
     const batteryLevelUuid = this.api.hap.uuid.generate(`${this.brand}-${this.inverterType}-battery-level`);
+
+    // ⚡ CRITICAL FIX: Detect and remove any cached accessories with invalid service names
+    // This prevents HAP-NodeJS validation errors and CPU spikes from "Battery %" characteristic
+    const accessoriesToRemove: PlatformAccessory[] = [];
+    for (const accessory of this.accessories) {
+      // Check for old Battery TemperatureSensor with invalid "Battery %" name
+      const tempSensor = accessory.getService(this.api.hap.Service.TemperatureSensor);
+      if (tempSensor) {
+        // Get all characteristics to check the Name
+        const nameChars = tempSensor.characteristics.filter(
+          c => c.UUID === this.api.hap.Characteristic.Name.UUID
+        );
+        for (const nameChar of nameChars) {
+          if (nameChar.value === 'Battery %' || String(nameChar.value).includes('Battery %')) {
+            this.log.warn('🚨 CRITICAL FIX: Found cached accessory with INVALID "Battery %" name!');
+            this.log.warn(`   Accessory: ${accessory.displayName} | Service: ${tempSensor.displayName}`);
+            this.log.warn('   This causes HAP-NodeJS validation errors and 90% CPU spike.');
+            this.log.warn('   ➤ Unregistering and will recreate with valid "Battery Level" name...');
+            accessoriesToRemove.push(accessory);
+            break;
+          }
+        }
+      }
+    }
+
+    // Remove all broken accessories
+    if (accessoriesToRemove.length > 0) {
+      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, accessoriesToRemove);
+      // Remove from our tracking array too
+      for (const broken of accessoriesToRemove) {
+        const idx = this.accessories.indexOf(broken);
+        if (idx >= 0) {
+          this.accessories.splice(idx, 1);
+        }
+      }
+      this.log.warn(`✅ Removed ${accessoriesToRemove.length} broken accessory(ies). Recreating now...`);
+    }
 
     // --- INVERTER ACCESSORY (LightSensor + Switch + Battery) ---
     let inverterAccessory = this.accessories.find(
@@ -267,7 +339,7 @@ export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
         );
     }
 
-    // --- SEPARATE SOLAR BATTERY ACCESSORY (TemperatureSensor as primary) ---
+    // --- SEPARATE SOLAR BATTERY ACCESSORY (Switch as primary + TemperatureSensor as secondary) ---
     let batteryLevelAccessory = this.accessories.find(
       (acc: PlatformAccessory) => acc.UUID === batteryLevelUuid,
     );
@@ -279,8 +351,8 @@ export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
         batteryLevelUuid,
       );
 
-      // Set category to SENSOR
-      batteryLevelAccessory.category = this.api.hap.Categories.SENSOR;
+      // Set category to SWITCH (creates a big tile on Home screen)
+      batteryLevelAccessory.category = this.api.hap.Categories.SWITCH;
 
       // Setup Accessory Information
       batteryLevelAccessory
@@ -288,10 +360,16 @@ export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
         .setCharacteristic(this.api.hap.Characteristic.Manufacturer, this.brand)
         .setCharacteristic(this.api.hap.Characteristic.Model, this.inverterType);
 
-      // Add TemperatureSensor as the ONLY service for clean Home screen tile display
+      // Add Switch as PRIMARY service (shows as big tile on Home screen)
+      batteryLevelAccessory.addService(
+        this.api.hap.Service.Switch,
+        'Battery Status',
+      );
+
+      // Add TemperatureSensor as SECONDARY service (shows battery level in details)
       batteryLevelAccessory.addService(
         this.api.hap.Service.TemperatureSensor,
-        'Battery %',
+        'Battery Level',
       );
 
       this.accessories.push(batteryLevelAccessory);
@@ -302,14 +380,47 @@ export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
 
     this.batteryLevelAccessory = batteryLevelAccessory;
 
-    // Get the Temperature Sensor service (displays battery level % as temperature on home screen tile)
-    this.temperatureSensorService =
-      this.batteryLevelAccessory.getService(this.api.hap.Service.TemperatureSensor) ||
-      this.batteryLevelAccessory.addService(this.api.hap.Service.TemperatureSensor);
+    // CRITICAL: Ensure Switch service exists (may be missing from old cached version)
+    // Get or CREATE switch service - never retrieve-only
+    this.batterySwitchService = batteryLevelAccessory.getService(this.api.hap.Service.Switch);
+    if (!this.batterySwitchService) {
+      this.log.warn('⚠️  Switch service missing from cached Solar Battery accessory. Adding it now...');
+      this.batterySwitchService = batteryLevelAccessory.addService(this.api.hap.Service.Switch);
+    }
 
+    if (this.batterySwitchService) {
+      this.batterySwitchService
+        .setCharacteristic(this.api.hap.Characteristic.Name, 'Battery Status')
+        .setCharacteristic(this.api.hap.Characteristic.On, true); // On = battery healthy
+    }
+
+    // CRITICAL: Ensure TemperatureSensor exists with CORRECT "Battery Level" name
+    // Remove any old "Battery %" characteristic first, then create fresh sensor
+    let tempSensorService = batteryLevelAccessory.getService(this.api.hap.Service.TemperatureSensor);
+    if (tempSensorService) {
+      // Check if it still has the old "Battery %" name
+      const nameChar = tempSensorService.getCharacteristic(this.api.hap.Characteristic.Name);
+      if (nameChar && (nameChar.value === 'Battery %' || String(nameChar.value).includes('Battery %'))) {
+        this.log.error('🚨 CRITICAL: Cached TemperatureSensor still has invalid "Battery %" name!');
+        this.log.error('   Removing and recreating with valid "Battery Level" name...');
+        batteryLevelAccessory.removeService(tempSensorService);
+        tempSensorService = undefined;
+      }
+    }
+
+    // If TemperatureSensor doesn't exist (was removed or never created), create it now
+    if (!tempSensorService) {
+      this.log.info('Creating fresh TemperatureSensor service for battery level display...');
+      tempSensorService = batteryLevelAccessory.addService(
+        this.api.hap.Service.TemperatureSensor,
+        'Battery Level',
+      );
+    }
+
+    this.temperatureSensorService = tempSensorService;
     if (this.temperatureSensorService) {
       this.temperatureSensorService
-        .setCharacteristic(this.api.hap.Characteristic.Name, 'Battery %')
+        .setCharacteristic(this.api.hap.Characteristic.Name, 'Battery Level')
         .setCharacteristic(this.api.hap.Characteristic.CurrentTemperature, 50); // Initial default (0-100 maps to battery %)
     }
   }
@@ -469,6 +580,14 @@ export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
         this.switchService.updateCharacteristic(
           this.api.hap.Characteristic.On,
           true,
+        );
+      }
+
+      if (this.batterySwitchService) {
+        // Update battery switch: on if healthy (>=10%), off if low
+        this.batterySwitchService.updateCharacteristic(
+          this.api.hap.Characteristic.On,
+          batterySoc >= 10, // On when battery is healthy
         );
       }
 
