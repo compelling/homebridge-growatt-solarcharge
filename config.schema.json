@@ -1,5 +1,5 @@
 {
-  "pluginAlias": "GrowattSolarCharge",
+  "pluginAlias": "InverterSolarCharge",
   "pluginType": "platform",
   "schema": {
     "type": "object",
@@ -34,6 +34,14 @@
         "title": "Serial Number",
         "type": "string",
         "description": "Enter your SolarCharge serial number for uploading data",
+        "required": true
+      },
+      "inverter": {
+        "title": "Inverter Model",
+        "type": "string",
+        "enum": ["Growatt SPH3600"],
+        "default": "Growatt SPH3600",
+        "description": "Select your inverter brand and model (e.g., 'Growatt SPH3600')",
         "required": true
       }
     }

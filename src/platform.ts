@@ -78,7 +78,7 @@ class DataBuffer {
   }
 }
 
-export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
+export class InverterSolarChargePlatform implements DynamicPlatformPlugin {
   // Cast the imported constructor to an unknown constructable object that outputs our interface.
   // This satisfies both the compiler and the strict 'no-explicit-any' ESLint rule.
   private readonly modbusClient =
@@ -87,17 +87,23 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
   private readonly plantId!: string;
   private readonly serialNum!: string;
   private readonly serialPort!: string;
+  private readonly brand!: string; // Inverter brand (e.g., 'Growatt')
+  private readonly inverterType!: string; // Inverter type (e.g., 'SPH3600')
   private readonly pollInterval: number = 5000; // Fixed polling: 5 seconds (hardcoded)
   private readonly uploadInterval!: number; // Aggregated upload interval (1-60 minutes)
 
   private pollingTimer?: NodeJS.Timeout;
   private uploadTimer?: NodeJS.Timeout;
   private dataBuffer!: DataBuffer;
-  private accessory?: PlatformAccessory;
+  private accessories: PlatformAccessory[] = []; // Track all cached and created accessories
+  private inverterAccessory?: PlatformAccessory;
+  private batteryLevelAccessory?: PlatformAccessory;
 
   // HomeKit Services
   private lightSensorService?: Service;
   private batteryService?: Service;
+  private switchService?: Service;
+  private temperatureSensorService?: Service;
 
   constructor(
     public readonly log: Logging,
@@ -114,6 +120,12 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
     this.plantId = config.plantId;
     this.serialNum = config.serialNum;
     this.serialPort = config.serialPort || '/dev/ttyUSB0';
+    
+    // Parse inverter string (format: "Brand Model", e.g., "Growatt SPH3600")
+    const inverterString = config.inverter || 'Growatt SPH3600';
+    const inverterParts = inverterString.split(' ');
+    this.brand = inverterParts[0]; // e.g., "Growatt"
+    this.inverterType = inverterParts.slice(1).join(' '); // e.g., "SPH3600" (supports multi-word models)
     // Fixed polling interval: always 5 seconds for HomeKit responsiveness
     this.pollInterval = 5000;
     // Upload aggregation interval: configurable, default 300s (5 minutes)
@@ -129,66 +141,198 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
 
   configureAccessory(accessory: PlatformAccessory): void {
     this.log.info('Loading accessory from cache:', accessory.displayName);
-    this.accessory = accessory;
+    
+    const inverterUuid = this.api.hap.uuid.generate(`${this.brand}-${this.inverterType}-inverter-device`);
+    const batteryLevelUuid = this.api.hap.uuid.generate(`${this.brand}-${this.inverterType}-battery-level`);
+    // Legacy UUIDs for cleanup (from previous Growatt-specific implementation)
+    const oldInverterUuid = this.api.hap.uuid.generate('growatt-sph-inverter-device-v2');
+    const oldInverterUuidV1 = this.api.hap.uuid.generate('growatt-sph-inverter-device');
+    const oldBatteryUuid = this.api.hap.uuid.generate('growatt-sph-battery-sensor');
+    const oldSolarUuid = this.api.hap.uuid.generate('growatt-sph-solar-sensor');
+
+    // Remove old legacy accessories from previous implementation
+    if (
+      accessory.UUID === oldInverterUuid ||
+      accessory.UUID === oldInverterUuidV1 ||
+      accessory.UUID === oldBatteryUuid ||
+      accessory.UUID === oldSolarUuid
+    ) {
+      this.log.info(
+        `Removing legacy accessory from cache: ${accessory.displayName}`,
+      );
+      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
+        accessory,
+      ]);
+      return;
+    }
+
+    this.accessories.push(accessory);
+
+    if (accessory.UUID === inverterUuid) {
+      this.inverterAccessory = accessory;
+    } else if (accessory.UUID === batteryLevelUuid) {
+      this.batteryLevelAccessory = accessory;
+    }
   }
 
-  // Initializes or updates the HomeKit accessory and its services
+  // Discovers or creates two separate HomeKit accessories with hierarchy:
+  //
+  // 📱 HOMEBRIDGE INVERTER SOLARCHARGE PLUGIN
+  // ├─ 🔌 ACCESSORY 1: "Solar Inverter"
+  // │  ├─ 💡 LightSensor → "Inverter Production" (Lux on Home screen)
+  // │  ├─ 🔘 Switch → "Inverter Connected" (toggle on Home screen)
+  // │  └─ 🔋 Battery → "Inverter Battery" (secondary - details only)
+  // │
+  // └─ 🔌 ACCESSORY 2: "Solar Battery"
+  //    └─ 🌡️ TemperatureSensor → "Battery %" (tile on Home screen)
 
-  private setupHomeKitAccessory(): void {
-    const uuid = this.api.hap.uuid.generate('homebridge-growatt-sph-inverter');
+  private discoverDevices(): void {
+    const inverterUuid = this.api.hap.uuid.generate(`${this.brand}-${this.inverterType}-inverter-device`);
+    const batteryLevelUuid = this.api.hap.uuid.generate(`${this.brand}-${this.inverterType}-battery-level`);
 
-    // If the accessory was not loaded from cache, create a new one
-    if (!this.accessory) {
-      this.log.info('Creating new Growatt Inverter accessory...');
-      this.accessory = new this.api.platformAccessory('Growatt Inverter', uuid);
+    // --- INVERTER ACCESSORY (LightSensor + Switch + Battery) ---
+    let inverterAccessory = this.accessories.find(
+      (acc: PlatformAccessory) => acc.UUID === inverterUuid,
+    );
+
+    if (!inverterAccessory) {
+      this.log.info('Registering Solar Inverter accessory...');
+      inverterAccessory = new this.api.platformAccessory(
+        'Solar Inverter',
+        inverterUuid,
+      );
+
+      // Set category to SENSOR (primary device type for HomeKit compatibility)
+      inverterAccessory.category = this.api.hap.Categories.SENSOR;
+
+      // Setup Accessory Information
+      inverterAccessory
+        .getService(this.api.hap.Service.AccessoryInformation)!
+        .setCharacteristic(this.api.hap.Characteristic.Manufacturer, this.brand)
+        .setCharacteristic(this.api.hap.Characteristic.Model, this.inverterType);
+
+      // Add services to the inverter accessory
+      inverterAccessory.addService(
+        this.api.hap.Service.LightSensor,
+        'Inverter Production',
+      );
+      inverterAccessory.addService(this.api.hap.Service.Switch, 'Inverter Connected');
+      inverterAccessory.addService(this.api.hap.Service.Battery, 'Inverter Battery');
+
+      this.accessories.push(inverterAccessory);
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
-        this.accessory,
+        inverterAccessory,
       ]);
     }
 
-    // Setup Accessory Information
-    this.accessory
-      .getService(this.api.hap.Service.AccessoryInformation)!
-      .setCharacteristic(this.api.hap.Characteristic.Manufacturer, 'Growatt')
-      .setCharacteristic(this.api.hap.Characteristic.Model, 'SPH3600');
+    this.inverterAccessory = inverterAccessory;
 
-    // Setup Light Sensor Service (Used to display current Watts as Lux)
+    // Get the Light Sensor service (displays current solar production in Lux)
     this.lightSensorService =
-      this.accessory.getService(this.api.hap.Service.LightSensor) ||
-      this.accessory.addService(this.api.hap.Service.LightSensor);
+      this.inverterAccessory.getService(this.api.hap.Service.LightSensor) ||
+      this.inverterAccessory.addService(this.api.hap.Service.LightSensor);
 
-    this.lightSensorService
-      .setCharacteristic(this.api.hap.Characteristic.Name, 'Current Production')
-      .setCharacteristic(
-        this.api.hap.Characteristic.CurrentAmbientLightLevel,
-        0.0001, // HomeKit minimum lux value
-      );
+    if (this.lightSensorService) {
+      this.lightSensorService
+        .setCharacteristic(this.api.hap.Characteristic.Name, 'Inverter Production')
+        .setCharacteristic(
+          this.api.hap.Characteristic.CurrentAmbientLightLevel,
+          0.0001, // HomeKit minimum lux value
+        );
+    }
 
-    // Setup Battery Service (Used to display Battery State of Charge %)
+    // Get the Switch service (virtual control button for Home app tile)
+    this.switchService =
+      this.inverterAccessory.getService(this.api.hap.Service.Switch) ||
+      this.inverterAccessory.addService(this.api.hap.Service.Switch);
+
+    if (this.switchService) {
+      this.switchService
+        .setCharacteristic(this.api.hap.Characteristic.Name, 'Inverter Connected')
+        .setCharacteristic(this.api.hap.Characteristic.On, true);
+    }
+
+    // Get the Battery service (displays battery SoC as secondary service)
     this.batteryService =
-      this.accessory.getService(this.api.hap.Service.Battery) ||
-      this.accessory.addService(this.api.hap.Service.Battery);
+      this.inverterAccessory.getService(this.api.hap.Service.Battery) ||
+      this.inverterAccessory.addService(this.api.hap.Service.Battery);
 
-    this.batteryService
-      .setCharacteristic(this.api.hap.Characteristic.Name, 'Inverter Battery')
-      .setCharacteristic(this.api.hap.Characteristic.BatteryLevel, 50) // Initial default
-      .setCharacteristic(
-        this.api.hap.Characteristic.StatusLowBattery,
-        this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL,
+    if (this.batteryService) {
+      this.batteryService
+        .setCharacteristic(this.api.hap.Characteristic.Name, 'Inverter Battery')
+        .setCharacteristic(this.api.hap.Characteristic.BatteryLevel, 50) // Initial default
+        .setCharacteristic(
+          this.api.hap.Characteristic.StatusLowBattery,
+          this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL,
+        );
+    }
+
+    // --- SEPARATE SOLAR BATTERY ACCESSORY (TemperatureSensor as primary) ---
+    let batteryLevelAccessory = this.accessories.find(
+      (acc: PlatformAccessory) => acc.UUID === batteryLevelUuid,
+    );
+
+    if (!batteryLevelAccessory) {
+      this.log.info('Registering Solar Battery accessory...');
+      batteryLevelAccessory = new this.api.platformAccessory(
+        'Solar Battery',
+        batteryLevelUuid,
       );
+
+      // Set category to SENSOR
+      batteryLevelAccessory.category = this.api.hap.Categories.SENSOR;
+
+      // Setup Accessory Information
+      batteryLevelAccessory
+        .getService(this.api.hap.Service.AccessoryInformation)!
+        .setCharacteristic(this.api.hap.Characteristic.Manufacturer, this.brand)
+        .setCharacteristic(this.api.hap.Characteristic.Model, this.inverterType);
+
+      // Add TemperatureSensor as the ONLY service for clean Home screen tile display
+      batteryLevelAccessory.addService(
+        this.api.hap.Service.TemperatureSensor,
+        'Battery %',
+      );
+
+      this.accessories.push(batteryLevelAccessory);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
+        batteryLevelAccessory,
+      ]);
+    }
+
+    this.batteryLevelAccessory = batteryLevelAccessory;
+
+    // Get the Temperature Sensor service (displays battery level % as temperature on home screen tile)
+    this.temperatureSensorService =
+      this.batteryLevelAccessory.getService(this.api.hap.Service.TemperatureSensor) ||
+      this.batteryLevelAccessory.addService(this.api.hap.Service.TemperatureSensor);
+
+    if (this.temperatureSensorService) {
+      this.temperatureSensorService
+        .setCharacteristic(this.api.hap.Characteristic.Name, 'Battery %')
+        .setCharacteristic(this.api.hap.Characteristic.CurrentTemperature, 50); // Initial default (0-100 maps to battery %)
+    }
   }
 
   private async connectAndStartPolling(): Promise<void> {
-    // Make sure HomeKit UI elements are ready
-    this.setupHomeKitAccessory();
+    // Make sure HomeKit UI elements are ready (discover or create Solar Inverter and Solar Battery accessories)
+    this.discoverDevices();
 
     try {
       this.log.info(
-        `Connecting to Growatt SPH via Modbus on: ${this.serialPort}...`,
+        `Connecting to inverter via Modbus on: ${this.serialPort}...`,
       );
-      await this.modbusClient.connectRTUBuffered(this.serialPort, {
+      
+      // Set a 10-second timeout for the connection attempt
+      const connectionPromise = this.modbusClient.connectRTUBuffered(this.serialPort, {
         baudRate: 9600,
       });
+      
+      const timeoutPromise = new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error('Modbus connection timeout after 10 seconds')), 10000)
+      );
+      
+      await Promise.race([connectionPromise, timeoutPromise]);
       this.modbusClient.setID(1);
 
       this.log.info(
@@ -215,6 +359,9 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
       this.log.error(
         `Failed to establish Modbus connection on ${this.serialPort}: ${error.message}`,
       );
+      // Retry connection after 30 seconds
+      this.log.info('Retrying connection in 30 seconds...');
+      setTimeout(() => this.connectAndStartPolling(), 30000);
     }
   }
 
@@ -242,7 +389,7 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
     try {
       this.log.debug('Polling inverter for data...');
 
-      // Read specific register blocks from Growatt SPH3600 (per ha-growatt-modbus)
+      // Read specific register blocks from configured inverter
       // Register 1-2: PV Power (u32) - addresses 1-2
       const pvResult = await this.modbusClient.readInputRegisters(1, 2);
       const pvRaw = pvResult?.data
@@ -316,8 +463,26 @@ export class GrowattSolarChargePlatform implements DynamicPlatformPlugin {
           isLow,
         );
       }
+
+      if (this.switchService) {
+        // Keep the switch always "On" to show inverter is running
+        this.switchService.updateCharacteristic(
+          this.api.hap.Characteristic.On,
+          true,
+        );
+      }
+
+      if (this.temperatureSensorService) {
+        // Display battery level as temperature value (0-100 maps to battery %)
+        this.temperatureSensorService.updateCharacteristic(
+          this.api.hap.Characteristic.CurrentTemperature,
+          batterySoc,
+        );
+      }
+
+
     } catch (error: any) {
-      this.log.error(`Error during Growatt inverter polling: ${error.message}`);
+      this.log.error(`Error during inverter polling: ${error.message}`);
     }
   }
 
